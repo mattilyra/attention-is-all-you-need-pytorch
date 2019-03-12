@@ -5,6 +5,7 @@ This script handling the training process.
 import argparse
 import math
 import time
+from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
@@ -135,7 +136,8 @@ def eval_epoch(model, validation_data, device, i_epoch=1):
     return loss_per_word, accuracy
 
 
-def train(model, training_data, validation_data, optimizer, device, opt):
+def train(model, training_data, validation_data, optimizer, device, opt,
+          model_prefix=''):
     ''' Start training '''
 
     log_train_file = None
@@ -171,8 +173,8 @@ def train(model, training_data, validation_data, optimizer, device, opt):
                                             epoch_i)
         print('  - (Validation) ppl: {ppl: 8.5f}, accuracy: {accu:3.3f} %, '
               'elapse: {elapse:3.3f} min'.format(
-                    ppl=math.exp(min(valid_loss, 100)), accu=100*valid_accu,
-                    elapse=(time.time()-start)/60))
+                  ppl=math.exp(min(valid_loss, 100)), accu=100*valid_accu,
+                  elapse=(time.time()-start)/60))
 
         valid_accus += [valid_accu]
 
@@ -184,11 +186,13 @@ def train(model, training_data, validation_data, optimizer, device, opt):
 
         if opt.save_model:
             if opt.save_mode == 'all':
-                model_name = (opt.save_model
-                              + f'_accu_{valid_accu:3.3%}.chkpt')
+                model_name = (Path(f'{opt.save_model}') /
+                              f'{model_prefix}{epoch_i:03d}.chkpt')
+                model_name = str(model_name)
                 torch.save(checkpoint, model_name)
             elif opt.save_mode == 'best':
-                model_name = opt.save_model + '.chkpt'
+                model_name = (Path(f'{opt.save_model}') /
+                              f'{model_prefix}BEST.chkpt')
                 if valid_accu >= max(valid_accus):
                     torch.save(checkpoint, model_name)
                     print('    - [Info] The checkpoint file has been updated.')
