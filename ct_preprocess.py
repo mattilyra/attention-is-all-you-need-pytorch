@@ -1,3 +1,4 @@
+"Preprocess CT corpus"
 # coding: utf-8
 import bz2
 import pickle
@@ -7,6 +8,7 @@ import joblib
 import torch
 from torch import optim
 from sklearn import model_selection
+import regex as re
 
 import train
 import transformer.Constants as Constants
@@ -28,7 +30,8 @@ def get_src_words(cache, idx):
         yield [Constants.BOS_WORD] + s[:MAX_MSG_LEN] + [Constants.EOS_WORD]
 
 
-def get_tgt_words(cache, idx):
+def get_tgt_words_slot_seq(cache, idx):
+    """Extract target slot sequences as BIO slot label sequences."""
     msgs = cache['message']
     y = cache['y']
     tgt_words = ([t.ent_slots.slot.value for t in msgs[i].subject]
@@ -38,6 +41,49 @@ def get_tgt_words(cache, idx):
 
     for s in tgt_words:
         yield [Constants.BOS_WORD] + s[:MAX_MSG_LEN] + [Constants.EOS_WORD]
+
+
+def get_tgt_words_request_slots(cache, idx):
+    """Extract target slot sequences as structured requests."""
+    msgs = cache['message']
+    y = cache['y']
+
+    for i in idx:
+        if y[i].gate <= 0.5:
+            continue
+        msg = msgs[i]
+        token_seq = [Constants.BOS_WORD]
+        start_of_slot = None
+        for t in msg.body:
+            if t.ent_slots.ent[2:] in {'EndOfMsg', 'Greeting'}:
+                if t.ent_slots.ent[2:] == 'EndOfMsg':
+                    break
+                else:
+                    continue
+            if t.ent_slots.slot.value[:2] == 'B.':
+                # start of new sequence
+                # add end of sequence
+                # start of new sequence
+                # and the first token of the new sequence
+                if start_of_slot is not None:
+                    token_seq.append('<EOSLOT>')
+
+                start_of_slot = t.ent_slots.slot.value[2:]
+                start_of_slot = re.sub(r'(\.[0-9]+)', '', start_of_slot)
+                token_seq.append(f'<{start_of_slot}>')
+                token_seq.append(t.text)
+            elif t.ent_slots.slot.value[:2] == 'I.':
+                assert len(token_seq) > 1
+                in_slot = t.ent_slots.slot.value[2:]
+                in_slot = re.sub(r'(\.[0-9]+)', '', in_slot)
+                assert start_of_slot == in_slot, f'{start_of_slot} != in_slot'
+                token_seq.append(t.text)
+            else:  # O-
+                if start_of_slot is not None:
+                    token_seq.append('<EOSLOT>')
+                start_of_slot = None
+        token_seq.append(Constants.EOS_WORD)
+        yield token_seq
 
 
 def generate_split_data(cache_path, i_split, trn, tst):
@@ -53,8 +99,11 @@ def generate_split_data(cache_path, i_split, trn, tst):
     trn_src_words = get_src_words(cache, trn)
     vld_src_words = get_src_words(cache, tst)
 
-    trn_tgt_words = get_tgt_words(cache, trn)
-    vld_tgt_words = get_tgt_words(cache, tst)
+    # trn_tgt_words = get_tgt_words_slot_seq(cache, trn)
+    # vld_tgt_words = get_tgt_words_slot_seq(cache, tst)
+
+    trn_tgt_words = get_tgt_words_request_slots(cache, trn)
+    vld_tgt_words = get_tgt_words_request_slots(cache, tst)
 
     src_word2idx, train_src_insts = docs_to_index_seq(trn_src_words,
                                                       min_word_count=5)
@@ -75,7 +124,7 @@ def generate_split_data(cache_path, i_split, trn, tst):
             'valid': {'src': valid_src_insts,
                       'tgt': valid_tgt_insts}}
 
-    out_fn = f'data/ct-inscope-{i_split:02d}.tok.pt'
+    out_fn = f'data/ct-inscope_NMT-SLOTS-{i_split:02d}.tok.pt'
     torch.save(data, out_fn)
     return out_fn
 
@@ -115,12 +164,11 @@ def docs_to_index_seq(docs, min_word_count=1, word2idx=None):
 
 if __name__ == '__main__':
     N = 68669  # hard coded because loading the cache is a pain
-    N = 5000  # hard coded because loading the cache is a pain
     cv = model_selection.KFold(n_splits=10)
     cache_path = '~/ct/ct-nlp-data/NLPPipeline_dsk_cache.pbz'
     jobs = ((cache_path, i_split, trn, tst)
             for i_split, (trn, tst) in enumerate(cv.split(list(range(N)))))
-    parallel = joblib.Parallel(n_jobs=1)
+    parallel = joblib.Parallel(n_jobs=2)
     data_files = parallel(joblib.delayed(generate_split_data)(*job)
                           for job in jobs)
 
@@ -134,25 +182,23 @@ if __name__ == '__main__':
         tgt_vocab_size = trn_data.dataset.tgt_vocab_size
 
         DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        mdl = Transformer(
-                src_vocab_size,
-                tgt_vocab_size,
-                # include <BOS> and <EOS>
-                data['settings'].get('max_word_seq_len', 200) + 2,
-                tgt_emb_prj_weight_sharing=args.proj_share_weight,
-                emb_src_tgt_weight_sharing=args.embs_share_weight,
-                d_k=args.d_k,
-                d_v=args.d_v,
-                d_model=args.d_model,
-                d_word_vec=args.d_word_vec,
-                d_inner=args.d_inner_hid,
-                n_layers=args.n_layers,
-                n_head=args.n_head,
-                dropout=args.dropout).to(DEVICE)
+        mdl = Transformer(src_vocab_size,
+                          tgt_vocab_size,
+                          # include <BOS> and <EOS>
+                          data['settings'].get('max_word_seq_len', 200) + 2,
+                          tgt_emb_prj_weight_sharing=args.proj_share_weight,
+                          emb_src_tgt_weight_sharing=args.embs_share_weight,
+                          d_k=args.d_k,
+                          d_v=args.d_v,
+                          d_model=args.d_model,
+                          d_word_vec=args.d_word_vec,
+                          d_inner=args.d_inner_hid,
+                          n_layers=args.n_layers,
+                          n_head=args.n_head,
+                          dropout=args.dropout).to(DEVICE)
 
-        optimizer = ScheduledOptim(
-                optim.Adam(filter(lambda x: x.requires_grad, mdl.parameters()),
-                           betas=(0.9, 0.98), eps=1e-09),
-                args.d_model, args.n_warmup_steps)
+        adam = optim.Adam(filter(lambda x: x.requires_grad, mdl.parameters()),
+                          betas=(0.9, 0.98), eps=1e-09)
+        optimizer = ScheduledOptim(adam, args.d_model, args.n_warmup_steps)
 
         train.train(mdl, trn_data, val_data, optimizer, DEVICE, args)
